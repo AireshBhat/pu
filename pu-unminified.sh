@@ -220,6 +220,7 @@ case "$k" in OPENAI_API_KEY) [ -z "${OPENAI_API_KEY:-}" ] && OPENAI_API_KEY=$v;;
  AGENT_PROVIDER) [ -z "${AGENT_PROVIDER:-}" ] && AGENT_PROVIDER=$v;;
  AGENT_MODEL) [ -z "${AGENT_MODEL:-}" ] && AGENT_MODEL=$v;;
  AGENT_EFFORT) [ -z "${AGENT_EFFORT:-}" ] && AGENT_EFFORT=$v;;
+ AGENT_OLLAMA_URL) [ -z "${AGENT_OLLAMA_URL:-}" ] && AGENT_OLLAMA_URL=$v;;
  esac;
 done < "$HOME/.pu.env";
 }
@@ -230,12 +231,17 @@ if [ -n "${AGENT_PROVIDER:-}" ];
 then PROVIDER=$AGENT_PROVIDER;
 else case "${AGENT_MODEL:-}" in gpt-*|o1*|o3*|o4*) PROVIDER=openai;;
  claude-*) PROVIDER=anthropic;;
+ *:*|llama*|qwen*|gpt-oss*|mistral*|mixtral*|phi*|gemma*|deepseek*) PROVIDER=ollama;;
  *) [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && PROVIDER=openai || PROVIDER=anthropic;;
  esac;
 fi
 case "$PROVIDER" in
   openai)
     MODEL="${AGENT_MODEL:-gpt-5.5}"
+    ;;
+
+  ollama)
+    MODEL="${AGENT_MODEL:-qwen3.6:27b}"
     ;;
 
   anthropic|*)
@@ -262,11 +268,12 @@ HISTORY="${AGENT_HISTORY-.pu-history.json}"
 CONFIRM="${AGENT_CONFIRM:-0}"
 
 CTX_LIMIT="${AGENT_CONTEXT_LIMIT:-400000}"
+OLLAMA_URL="${AGENT_OLLAMA_URL:-http://localhost:11434}"
 VERBOSE="${AGENT_VERBOSE:-1}"
 THINKING="${AGENT_THINKING:-}"
 EFFORT="${AGENT_EFFORT:-${AGENT_THINKING:-medium}}"
 EFFORT_OK=0
-case "$PROVIDER:$MODEL" in openai:gpt-5.5*) EFFORT_OK=1;; anthropic:claude-opus-4-7*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=272000; EFFORT_OK=1;; anthropic:claude-opus-4-6*|anthropic:claude-sonnet-4-6*|anthropic:claude-opus-4-5*) EFFORT_OK=1;; esac
+case "$PROVIDER:$MODEL" in openai:gpt-5.5*) EFFORT_OK=1;; anthropic:claude-opus-4-7*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=272000; EFFORT_OK=1;; anthropic:claude-opus-4-6*|anthropic:claude-sonnet-4-6*|anthropic:claude-opus-4-5*) EFFORT_OK=1;; ollama:*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=32768;; esac
 
 PIPE=0
 COST=0
@@ -285,7 +292,7 @@ Your source code is at $(cd "$(dirname "$0")" && pwd)/$(basename "$0"). Use read
 
 
 while [ $# -gt 0 ];
-do case "$1" in -h|--help) printf '%s\n' 'pu-unminified.sh — readable educational build of pu.sh (sh+curl, no deps)' 'Usage: ./pu-unminified.sh "task" | ./pu-unminified.sh (interactive) | --pipe | --cost | -v' 'Env: ANTHROPIC_API_KEY OPENAI_API_KEY AGENT_MODEL AGENT_PROVIDER AGENT_SYSTEM AGENT_MAX_STEPS AGENT_MAX_TOKENS AGENT_LOG AGENT_CONFIRM AGENT_VERBOSE AGENT_CONTEXT_LIMIT AGENT_RESERVE AGENT_TOOL_TRUNC AGENT_READ_MAX AGENT_HISTORY AGENT_THINKING/AGENT_EFFORT AGENT_PRICE_* ~/.pu.env' '7 tools, multi-turn, retries, JSONL logging, pipe mode, !command; auto-compaction summarizes older turns; /compact [focus] runs it manually.';
+do case "$1" in -h|--help) printf '%s\n' 'pu-unminified.sh — readable educational build of pu.sh (sh+curl, no deps)' 'Usage: ./pu-unminified.sh "task" | ./pu-unminified.sh (interactive) | --pipe | --cost | -v' 'Env: ANTHROPIC_API_KEY OPENAI_API_KEY AGENT_OLLAMA_URL AGENT_MODEL AGENT_PROVIDER AGENT_SYSTEM AGENT_MAX_STEPS AGENT_MAX_TOKENS AGENT_LOG AGENT_CONFIRM AGENT_VERBOSE AGENT_CONTEXT_LIMIT AGENT_RESERVE AGENT_TOOL_TRUNC AGENT_READ_MAX AGENT_HISTORY AGENT_THINKING/AGENT_EFFORT AGENT_PRICE_* ~/.pu.env' '7 tools, multi-turn, retries, JSONL logging, pipe mode, !command; auto-compaction summarizes older turns; /compact [focus] runs it manually.';
 exit 0;;
 -v|--version)echo "pu-unminified.sh 1.0.0";
 exit 0;;
@@ -498,6 +505,15 @@ case "$eb" in minimal|low) [ $mt -lt 4096 ] && mt=4096;;
     -d "{\"model\":\"$MODEL\",\"max_output_tokens\":$mt${rp},\"instructions\":\"$sys_esc\",\"input\":$1,\"tools\":[$RF]}" \
     https://api.openai.com/v1/responses 2>&1;;
 
+  ollama) local sys_msg rest msgs;
+    sys_msg="{\"role\":\"system\",\"content\":\"$sys_esc\"}";
+    rest=$(printf '%s' "$1" | sed 's/^\[//');
+    case "$rest" in ']'|'') msgs="[$sys_msg]";; *) msgs="[$sys_msg,$rest";; esac;
+    curl -sS -m120 \
+    -H content-type:application/json \
+    -d "{\"model\":\"$MODEL\",\"messages\":$msgs,\"tools\":[$TF],\"stream\":false,\"options\":{\"num_predict\":$mt,\"num_ctx\":$CTX_LIMIT}}" \
+    "$OLLAMA_URL/api/chat" 2>&1;;
+
   esac;
 }
 
@@ -544,6 +560,21 @@ local tt;
 tt=$(jb "$resp" "text");
 TX=$(jp "$tt" text)
     fi
+  elif [ "$PROVIDER" = ollama ];
+then
+    local msg tcs;
+msg=$(jp "$resp" message);
+TX=$(jp "$msg" content);
+tcs=$(jp "$msg" tool_calls)
+    case "$tcs" in ''|null|'[]') TY=X;;
+ *) TY=T;
+TC=$tcs;
+local first;
+first=$(jb "$tcs" function);
+TN=$(jp "$first" name);
+TINP=$(jp "$first" arguments);
+TI="ollama_0";;
+ esac
   else
     TC=$(jp "$resp" output);
 local call;
@@ -854,6 +885,8 @@ track_tokens(){ local u a b;
 u=$(jp "$1" usage)
   case "$PROVIDER" in anthropic) a=$(jp "$u" input_tokens);
 b=$(jp "$u" output_tokens);;
+ ollama) a=$(jp "$1" prompt_eval_count);
+b=$(jp "$1" eval_count);;
  *) a=$(jp "$u" input_tokens);
 b=$(jp "$u" output_tokens);
 [ -z "$a" ] && a=$(jp "$u" prompt_tokens);
@@ -1160,11 +1193,13 @@ return 1;
     if [ "$TY" = "T" ] && [ -n "$TN" ];
 then
       [ -n "$TX" ] && [ "$TX" != null ] && _say "$TX"
-      local trs="" trm="" trc="" _tu _tn _ti _tinp _tout _tesc _fn _src _mark
+      local trs="" trm="" trc="" _tu _tn _ti _tinp _tout _tesc _fn _src _mark _ollama_idx=0
       case "$PROVIDER" in anthropic) _src="$CB";
 _mark='"type":"tool_use"';;
  openai) _src="$TC";
 _mark='"function_call"';;
+ ollama) _src="$TC";
+_mark='"function":{';;
  esac
       _src=$(printf '%s' "$_src" | tr -d '\n')
       while IFS= read -r _tu;
@@ -1182,6 +1217,12 @@ _ti=$(jp "$_tu" call_id);
 [ -z "$_ti" ] && _ti=$(jp "$_tu" id);
 _tn=$(jp "$_tu" name);
 _tinp=$(jp "$_tu" arguments);;
+
+          ollama) _ollama_idx=$((_ollama_idx+1));
+_tn=$(jp "$_tu" name);
+_tinp=$(jp "$_tu" arguments);
+[ -z "$_tinp" ] && _tinp='{}';
+_ti="ollama_${step}_${_ollama_idx}";;
 
         esac
         { [ -z "$_ti" ] || [ -z "$_tn" ];
@@ -1226,6 +1267,10 @@ _ti0="$TINP";
         };;
 
         openai) append "${trc}${trm}";;
+
+        ollama) local _otx;
+_otx=$(json_escape "${TX:-}");
+append "{$RA,\"content\":\"${_otx}\",\"tool_calls\":${TC}}${trm}";;
 
       esac;
 save
@@ -1299,10 +1344,11 @@ _sq(){ printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")";
 # Authentication helpers: discover, prompt for, and persist provider API keys.
 _have_key(){ case "$PROVIDER" in anthropic) [ -n "${ANTHROPIC_API_KEY:-}" ];;
  openai) [ -n "${OPENAI_API_KEY:-}" ];;
+ ollama) return 0;;
  *) return 2;;
  esac;
 }
-_ensure_key(){ _have_key || { [ -t 0 ] && _setup || { err "No API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY (https://console.anthropic.com/settings/keys | https://platform.openai.com/api-keys)";
+_ensure_key(){ _have_key || { [ -t 0 ] && _setup || { err "No API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pick Ollama (https://console.anthropic.com/settings/keys | https://platform.openai.com/api-keys | https://ollama.com)";
 return 1;
 };
 };
@@ -1312,22 +1358,32 @@ return 1;
 _set_provider_model(){ PROVIDER="$1";
 MODEL="$2";
 EFFORT_OK=0;
-case "$PROVIDER:$MODEL" in openai:gpt-5.5*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=400000; EFFORT_OK=1;; anthropic:claude-opus-4-7*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=272000; EFFORT_OK=1;; anthropic:claude-opus-4-6*|anthropic:claude-sonnet-4-6*|anthropic:claude-opus-4-5*) EFFORT_OK=1;; esac;
+case "$PROVIDER:$MODEL" in openai:gpt-5.5*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=400000; EFFORT_OK=1;; anthropic:claude-opus-4-7*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=272000; EFFORT_OK=1;; anthropic:claude-opus-4-6*|anthropic:claude-sonnet-4-6*|anthropic:claude-opus-4-5*) EFFORT_OK=1;; ollama:*) [ -z "${AGENT_CONTEXT_LIMIT:-}" ] && CTX_LIMIT=32768;; esac;
 }
 
 # Interactive setup: guide a new user through provider and API-key configuration.
 _setup(){ local p k m e s u km dm os
-  printf '\nWelcome to pu-unminified.sh.\n\nProvider:\n  1) Anthropic (Claude)\n  2) OpenAI (GPT)\n> ' >&2;
+  printf '\nWelcome to pu-unminified.sh.\n\nProvider:\n  1) Anthropic (Claude)\n  2) OpenAI (GPT)\n  3) Ollama (local)\n> ' >&2;
 read -r p
   case "$p" in 2|openai|OpenAI) PROVIDER=openai;
 km=OPENAI_API_KEY;
 u=https://platform.openai.com/api-keys;
 dm=gpt-5.5;;
+ 3|ollama|Ollama) PROVIDER=ollama;
+km='';
+u='';
+dm=qwen3.6:27b;;
  *) PROVIDER=anthropic;
 km=ANTHROPIC_API_KEY;
 u=https://console.anthropic.com/settings/keys;
 dm=claude-opus-4-7;;
  esac
+  if [ "$PROVIDER" = ollama ];
+then printf 'Ollama URL [%s]: ' "$OLLAMA_URL" >&2;
+read -r u;
+[ -n "$u" ] && OLLAMA_URL="$u";
+k='';
+else
   command -v open >/dev/null 2>&1 && open "$u" 2>/dev/null || command -v xdg-open >/dev/null 2>&1 && xdg-open "$u" 2>/dev/null || true
   printf 'Get a key at %s\nPaste API key (hidden): ' "$u" >&2;
 os=$(stty -g 2>/dev/null || true);
@@ -1339,10 +1395,14 @@ printf '\n' >&2
   [ -z "$k" ] && { err "No key entered";
 exit 1;
 };
+fi
 printf 'Model [%s]: ' "$dm" >&2;
 read -r m;
 [ -z "$m" ] && m=$dm;
 _set_provider_model "$PROVIDER" "$m"
+  if [ "$PROVIDER" = ollama ];
+then EFFORT='';
+else
   printf 'Effort [medium] (OpenAI: none/minimal/low/medium/high/xhigh; Claude: low/medium/high/max, xhigh on Opus 4.7): ' >&2;
 read -r e;
 [ -z "$e" ] && e=medium;
@@ -1354,12 +1414,17 @@ case "$e" in n) e=none;;
  x|xh) e=xhigh;;
  esac;
 EFFORT=$e;
-export "$km=$k" AGENT_PROVIDER="$PROVIDER" AGENT_MODEL="$MODEL" AGENT_EFFORT="$EFFORT"
+fi
+[ -n "$km" ] && export "$km=$k";
+export AGENT_PROVIDER="$PROVIDER" AGENT_MODEL="$MODEL" AGENT_EFFORT="$EFFORT" AGENT_OLLAMA_URL="$OLLAMA_URL"
   printf 'Save to ~/.pu.env so next time is automatic? [Y/n] ' >&2;
 read -r s;
 case "$s" in n|N|no|NO) info "Not saved (set in this session only)";;
  *) (umask 077;
-printf '%s=%s\nAGENT_PROVIDER=%s\nAGENT_MODEL=%s\nAGENT_EFFORT=%s\n' "$km" "$(_sq "$k")" "$(_sq "$PROVIDER")" "$(_sq "$MODEL")" "$(_sq "$EFFORT")" > "$HOME/.pu.env") && info "Saved ~/.pu.env";;
+{ [ -n "$km" ] && printf '%s=%s\n' "$km" "$(_sq "$k")";
+printf 'AGENT_PROVIDER=%s\nAGENT_MODEL=%s\nAGENT_EFFORT=%s\n' "$(_sq "$PROVIDER")" "$(_sq "$MODEL")" "$(_sq "$EFFORT")";
+[ "$PROVIDER" = ollama ] && printf 'AGENT_OLLAMA_URL=%s\n' "$(_sq "$OLLAMA_URL")";
+} > "$HOME/.pu.env") && info "Saved ~/.pu.env";;
  esac;
 }
 
@@ -1370,6 +1435,7 @@ handle_cmd(){ case "$1" in
 nm=$(printf '%s' "$1" | sed 's|^/model *||')
     [ -n "$nm" ] && { case "$nm" in gpt-*|o1*|o3*|o4*) _set_provider_model openai "$nm";;
  claude-*) _set_provider_model anthropic "$nm";;
+ *:*|llama*|qwen*|gpt-oss*|mistral*|mixtral*|phi*|gemma*|deepseek*) _set_provider_model ollama "$nm";;
  *) MODEL="$nm";;
  esac;
 info "Model: $MODEL ($PROVIDER)";
